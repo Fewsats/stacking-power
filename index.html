@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Grid Game</title>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            background-color: rgba(76, 175, 80, 0.7);
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: rgba(69, 160, 73, 0.9);
+        }
+        .instructions {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+            text-align: center;
+            max-width: 500px;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button id="turn-left">Turn Left</button>
+        <button id="pause">Pause</button>
+        <button id="turn-right">Turn Right</button>
+    </div>
+    <div class="instructions">
+        <p>Use arrow keys or buttons to control: Left/Right arrows to turn, Space to pause/resume.</p>
+        <p>The character will automatically move forward in the current direction.</p>
+    </div>
+
+    <script>
+        // Game parameters
+        const gridSize = 30;
+        const cellSize = 10;
+        const wallHeight = 0.5;
+        const moveInterval = 800; // ms between moves
+        
+        // Game state
+        let playerPosition = { x: Math.floor(gridSize / 2), y: 0, z: Math.floor(gridSize / 2) };
+        let direction = 0; // 0: north, 1: east, 2: south, 3: west
+        let isMoving = true;
+        let visitedCells = {};
+        let clock = new THREE.Clock();
+        let deltaTime = 0;
+        let moveCooldown = 0;
+        let isTransitioning = false;
+        let targetPosition = { x: 0, y: 0, z: 0 };
+        let startPosition = { x: 0, y: 0, z: 0 };
+        let transitionProgress = 0;
+        let transitionDuration = 0.4; // seconds
+        let isRotating = false;
+        let currentRotation = 0;
+        let targetRotation = 0;
+        let rotationProgress = 0;
+        let rotationDuration = 0.3; // seconds
+        
+        // Directions as vectors [dx, dz]
+        const directions = [
+            [0, -1], // north (z decreases as we move forward)
+            [1, 0],  // east
+            [0, 1],  // south
+            [-1, 0]  // west
+        ];
+        
+        // Set up the scene
+        const scene = new THREE.Scene();
+        
+        // Set up the camera
+        const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.y = 15; // Increased from 2 to 15 for a higher viewpoint
+        
+        // Set up the renderer
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x87CEEB); // Sky blue color
+        document.body.appendChild(renderer.domElement);
+        
+        // Add a sun (directional light)
+        const sunLight = new THREE.DirectionalLight(0xffffcc, 1);
+        sunLight.position.set(50, 100, 50);
+        scene.add(sunLight);
+        
+        // Add ambient light
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+        scene.add(ambientLight);
+        
+        // Create a sun sphere
+        const sunGeometry = new THREE.SphereGeometry(10, 32, 32);
+        const sunMaterial = new THREE.MeshBasicMaterial({ color: 0xffff99 });
+        const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+        sun.position.set(80, 100, 80);
+        scene.add(sun);
+        
+        // Create sky dome
+        const skyGeometry = new THREE.SphereGeometry(400, 32, 32);
+        const skyMaterial = new THREE.MeshBasicMaterial({ 
+            color: 0x87CEEB, 
+            side: THREE.BackSide 
+        });
+        const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+        scene.add(sky);
+        
+        // Create ground plane
+        const groundGeometry = new THREE.PlaneGeometry(gridSize * cellSize * 2, gridSize * cellSize * 2);
+        const groundMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x556B2F,
+            roughness: 0.8
+        });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2; // Rotate to be horizontal
+        ground.position.y = -0.01; // Slightly below grid
+        scene.add(ground);
+        
+        // Create grid with walls
+        const wallMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x808080,
+            roughness: 0.7
+        });
+        const gridGroup = new THREE.Group();
+        
+        // Create grid cells
+        for (let x = 0; x < gridSize; x++) {
+            for (let z = 0; z < gridSize; z++) {
+                // Create floor tile for each cell
+                const floorGeometry = new THREE.BoxGeometry(cellSize, 0.1, cellSize);
+                const floorMaterial = new THREE.MeshStandardMaterial({ 
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.3
+                });
+                const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+                floor.position.set(
+                    (x - gridSize/2) * cellSize + cellSize/2,
+                    0,
+                    (z - gridSize/2) * cellSize + cellSize/2
+                );
+                floor.userData = { type: 'floor', gridX: x, gridZ: z };
+                gridGroup.add(floor);
+            }
+        }
+        
+        scene.add(gridGroup);
+        
+        // Create player (red ball instead of blue cube)
+        const playerGeometry = new THREE.SphereGeometry(0.8, 32, 32); // Sphere for ball shape
+        const playerMaterial = new THREE.MeshStandardMaterial({ color: 0xFF0000 }); // Red color
+        const player = new THREE.Mesh(playerGeometry, playerMaterial);
+        player.position.set(
+            (playerPosition.x - gridSize/2) * cellSize + cellSize/2,
+            playerPosition.y + 0.8, // Raised slightly more for ball
+            (playerPosition.z - gridSize/2) * cellSize + cellSize/2
+        );
+        
+        // Add shadow to player
+        player.castShadow = true;
+        
+        scene.add(player);
+        
+        // Initial camera positioning
+        updateCameraPosition();
+        
+        // Mark starting cell as visited
+        markCellAsVisited(playerPosition.x, playerPosition.z);
+        
+        // Game loop with smooth transitions
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            deltaTime = clock.getDelta();
+            
+            // Handle movement transitions (jump animation)
+            if (isTransitioning) {
+                transitionProgress += deltaTime / transitionDuration;
+                
+                if (transitionProgress >= 1) {
+                    // Transition complete
+                    transitionProgress = 1;
+                    isTransitioning = false;
+                    moveCooldown = moveInterval / 1000 - transitionDuration; // Subtract transition time from cooldown
+                }
+                
+                // Interpolate position with jump arc
+                player.position.x = startPosition.x + (targetPosition.x - startPosition.x) * transitionProgress;
+                player.position.z = startPosition.z + (targetPosition.z - startPosition.z) * transitionProgress;
+                
+                // Add jump height - parabola that peaks in the middle of the jump
+                // sin(π * t) gives us a curve that starts at 0, peaks at 1, and returns to 0
+                const jumpHeight = Math.sin(Math.PI * transitionProgress) * 2; 
+                player.position.y = startPosition.y + jumpHeight;
+                
+                // Update camera to follow player
+                updateCameraPosition();
+            } else {
+                // Reset y position when not jumping
+                player.position.y = 0.8;
+            }
+            
+            // Handle camera rotation
+            if (isRotating) {
+                rotationProgress += deltaTime / rotationDuration;
+                
+                if (rotationProgress >= 1) {
+                    // Rotation complete
+                    rotationProgress = 1;
+                    isRotating = false;
+                    currentRotation = targetRotation;
+                }
+                
+                // Smooth camera rotation
+                updateCameraRotation();
+            }
+            
+            if (moveCooldown > 0) {
+                moveCooldown -= deltaTime;
+            } else if (isMoving && !isTransitioning) {
+                // Time to move again (only if not already moving)
+                movePlayer();
+            }
+            
+            // Rotate sun
+            sun.position.x = 80 * Math.cos(clock.elapsedTime * 0.05);
+            sun.position.z = 80 * Math.sin(clock.elapsedTime * 0.05);
+            
+            // Update sunlight direction
+            sunLight.position.copy(sun.position);
+            
+            renderer.render(scene, camera);
+        }
+        
+        // Move the player with smooth transitions
+        function movePlayer() {
+            if (!isMoving || isTransitioning) return;
+            
+            // Get current direction vector
+            const [dx, dz] = directions[direction];
+            
+            // Calculate new position
+            const newX = playerPosition.x + dx;
+            const newZ = playerPosition.z + dz;
+            
+            // Check if new position is within bounds
+            if (newX >= 0 && newX < gridSize && newZ >= 0 && newZ < gridSize) {
+                // Start transition to new position
+                isTransitioning = true;
+                transitionProgress = 0;
+                
+                // Store start and target positions
+                startPosition = {
+                    x: player.position.x,
+                    y: player.position.y,
+                    z: player.position.z
+                };
+                
+                // Calculate world position from grid position
+                targetPosition = {
+                    x: (newX - gridSize/2) * cellSize + cellSize/2,
+                    y: player.position.y,
+                    z: (newZ - gridSize/2) * cellSize + cellSize/2
+                };
+                
+                // Update grid position
+                playerPosition.x = newX;
+                playerPosition.z = newZ;
+                
+                // Mark cell as visited
+                markCellAsVisited(playerPosition.x, playerPosition.z);
+            } else {
+                // Hit the boundary, turn around
+                direction = (direction + 2) % 4;
+                updateCameraRotation();
+            }
+        }
+        
+        // Mark a cell as visited
+        function markCellAsVisited(x, z) {
+            const cellKey = `${x}-${z}`;
+            if (!visitedCells[cellKey]) {
+                visitedCells[cellKey] = true;
+                
+                // Find the floor at this position
+                gridGroup.children.forEach(child => {
+                    if (child.userData.type === 'floor' && 
+                        child.userData.gridX === x && 
+                        child.userData.gridZ === z) {
+                        // Change material to red (instead of random color)
+                        child.material = new THREE.MeshStandardMaterial({
+                            color: 0xFF0000, // Always red now
+                            transparent: false,
+                            opacity: 1
+                        });
+                    }
+                });
+            }
+        }
+        
+        // Update camera position based on player position and direction
+        function updateCameraPosition() {
+            // Position the camera higher above and behind the player for better visibility
+            const [dx, dz] = directions[direction];
+            
+            // Calculate an offset position behind the player
+            const offsetDistance = 20; // Distance behind player
+            const heightOffset = 20; // Height above player
+            
+            // Get current look direction based on rotation interpolation
+            let rotationAngle = currentRotation;
+            
+            if (isRotating) {
+                // Interpolate between current and target rotation
+                const startAngle = currentRotation;
+                const angleDiff = targetRotation - startAngle;
+                
+                // Handle wraparound for angle differences (going from 270° to 0° should rotate 90° not -270°)
+                let shortestAngleDiff = ((angleDiff % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+                if (shortestAngleDiff > Math.PI) {
+                    shortestAngleDiff -= Math.PI * 2;
+                }
+                
+                rotationAngle = startAngle + shortestAngleDiff * rotationProgress;
+            }
+            
+            // Calculate camera position based on the interpolated angle
+            const offsetX = Math.sin(rotationAngle) * offsetDistance;
+            const offsetZ = Math.cos(rotationAngle) * offsetDistance;
+            
+            // Set the camera position
+            camera.position.set(
+                player.position.x - offsetX,
+                player.position.y + heightOffset,
+                player.position.z - offsetZ
+            );
+            
+            // Make camera look at a point in front of the player
+            const lookAtPoint = new THREE.Vector3(
+                player.position.x + Math.sin(rotationAngle) * 30, // Look ahead of the player
+                player.position.y,
+                player.position.z + Math.cos(rotationAngle) * 30
+            );
+            camera.lookAt(lookAtPoint);
+        }
+        
+        // Update camera rotation - now handles smooth transitions
+        function updateCameraRotation() {
+            updateCameraPosition(); // Just update the position which handles rotation too
+        }
+        
+        // Handle direction changes with smooth rotation
+        function changeDirection(newDirection) {
+            // Don't start a new rotation if one is in progress
+            if (isRotating) return;
+            
+            direction = newDirection;
+            
+            // Start rotation transition
+            isRotating = true;
+            rotationProgress = 0;
+            
+            // Store current rotation as starting point
+            currentRotation = getCurrentAngleFromDirection();
+            
+            // Calculate target rotation based on new direction
+            targetRotation = getAngleFromDirection(direction);
+        }
+        
+        // Get the current camera angle (based on direction and any in-progress rotation)
+        function getCurrentAngleFromDirection() {
+            if (direction === 0) return Math.PI; // North
+            if (direction === 1) return Math.PI / 2; // East
+            if (direction === 2) return 0; // South
+            if (direction === 3) return -Math.PI / 2; // West
+            return 0;
+        }
+        
+        // Get angle for a specific direction
+        function getAngleFromDirection(dir) {
+            if (dir === 0) return Math.PI; // North
+            if (dir === 1) return Math.PI / 2; // East
+            if (dir === 2) return 0; // South
+            if (dir === 3) return -Math.PI / 2; // West
+            return 0;
+        }
+        
+        // Controls
+        document.getElementById('turn-left').addEventListener('click', () => {
+            changeDirection((direction + 3) % 4); // Turn left
+        });
+        
+        document.getElementById('turn-right').addEventListener('click', () => {
+            changeDirection((direction + 1) % 4); // Turn right
+        });
+        
+        document.getElementById('pause').addEventListener('click', () => {
+            isMoving = !isMoving;
+            document.getElementById('pause').textContent = isMoving ? 'Pause' : 'Resume';
+        });
+        
+        // Keyboard controls
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'ArrowLeft') {
+                changeDirection((direction + 3) % 4); // Turn left
+            } else if (event.key === 'ArrowRight') {
+                changeDirection((direction + 1) % 4); // Turn right
+            } else if (event.key === ' ') {
+                isMoving = !isMoving;
+                document.getElementById('pause').textContent = isMoving ? 'Pause' : 'Resume';
+            } else if (event.key === 'ArrowUp') {
+                // Move forward manually
+                movePlayer();
+            } else if (event.key === 'ArrowDown') {
+                // Move backward
+                const oldDirection = direction;
+                direction = (direction + 2) % 4; // Turn around
+                movePlayer();
+                direction = oldDirection; // Turn back
+            }
+        });
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        // Add some clouds
+        function createCloud(x, y, z) {
+            const cloud = new THREE.Group();
+            const cloudMaterial = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.8
+            });
+            
+            // Create multiple spheres to form a cloud shape
+            const sizes = [3, 2.5, 2, 3.5, 2.8];
+            const positions = [
+                [0, 0, 0],
+                [2, 0.5, 1],
+                [-1.5, 0, -1],
+                [1, -0.5, -2],
+                [-2, -0.3, 1.5]
+            ];
+            
+            for (let i = 0; i < sizes.length; i++) {
+                const cloudPartGeometry = new THREE.SphereGeometry(sizes[i], 16, 16);
+                const cloudPart = new THREE.Mesh(cloudPartGeometry, cloudMaterial);
+                cloudPart.position.set(positions[i][0], positions[i][1], positions[i][2]);
+                cloud.add(cloudPart);
+            }
+            
+            cloud.position.set(x, y, z);
+            return cloud;
+        }
+        
+        // Add some clouds to the scene
+        const clouds = [];
+        for (let i = 0; i < 10; i++) {
+            const x = (Math.random() - 0.5) * 200;
+            const y = 50 + Math.random() * 30;
+            const z = (Math.random() - 0.5) * 200;
+            const cloud = createCloud(x, y, z);
+            clouds.push(cloud);
+            scene.add(cloud);
+        }
+        
+        // Animate clouds slowly
+        function animateClouds() {
+            clouds.forEach(cloud => {
+                cloud.position.x += 0.05;
+                if (cloud.position.x > 150) {
+                    cloud.position.x = -150;
+                }
+            });
+        }
+        
+        // Enhanced animation loop with cloud movement
+        function enhancedAnimate() {
+            requestAnimationFrame(enhancedAnimate);
+            
+            deltaTime = clock.getDelta();
+            
+            // Handle movement transitions (jump animation)
+            if (isTransitioning) {
+                transitionProgress += deltaTime / transitionDuration;
+                
+                if (transitionProgress >= 1) {
+                    // Transition complete
+                    transitionProgress = 1;
+                    isTransitioning = false;
+                    moveCooldown = moveInterval / 1000 - transitionDuration; // Subtract transition time from cooldown
+                }
+                
+                // Interpolate position with jump arc
+                player.position.x = startPosition.x + (targetPosition.x - startPosition.x) * transitionProgress;
+                player.position.z = startPosition.z + (targetPosition.z - startPosition.z) * transitionProgress;
+                
+                // Add jump height - parabola that peaks in the middle of the jump
+                const jumpHeight = Math.sin(Math.PI * transitionProgress) * 2;
+                player.position.y = startPosition.y + jumpHeight;
+                
+                // Update camera to follow player
+                updateCameraPosition();
+            } else {
+                // Reset y position when not jumping
+                player.position.y = 0.8;
+            }
+            
+            // Handle camera rotation
+            if (isRotating) {
+                rotationProgress += deltaTime / rotationDuration;
+                
+                if (rotationProgress >= 1) {
+                    // Rotation complete
+                    rotationProgress = 1;
+                    isRotating = false;
+                    currentRotation = targetRotation;
+                }
+                
+                // Smooth camera rotation
+                updateCameraRotation();
+            }
+            
+            if (moveCooldown > 0) {
+                moveCooldown -= deltaTime;
+            } else if (isMoving && !isTransitioning) {
+                // Time to move again
+                movePlayer();
+            }
+            
+            // Rotate sun
+            sun.position.x = 80 * Math.cos(clock.elapsedTime * 0.05);
+            sun.position.z = 80 * Math.sin(clock.elapsedTime * 0.05);
+            
+            // Update sunlight direction
+            sunLight.position.copy(sun.position);
+            
+            // Animate clouds
+            animateClouds();
+            
+            renderer.render(scene, camera);
+        }
+        
+        // Start the animation
+        enhancedAnimate();
+    </script>
+</body>
+</html> 
